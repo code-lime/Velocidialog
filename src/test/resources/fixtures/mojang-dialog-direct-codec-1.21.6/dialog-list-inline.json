@@ -1,0 +1,1 @@
+{"type":"minecraft:dialog_list","title":"List","dialogs":[{"type":"minecraft:notice","title":"First"},{"type":"minecraft:confirmation","title":"Second","yes":{"label":"Yes"},"no":{"label":"No"}}],"exit_action":{"label":"Back","width":90},"columns":4,"button_width":180}

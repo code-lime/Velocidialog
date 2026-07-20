@@ -1,0 +1,298 @@
+name: Velocity Client Game Tests
+
+on:
+  workflow_call:
+    inputs:
+      matrix:
+        required: true
+        type: string
+      report_latest_release:
+        description: If not empty string, create an issue for a released plugin test failure
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  process-build:
+    name: Test Velocity ${{ matrix.key }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include: ${{ fromJSON(inputs.matrix) }}
+    if: ${{ inputs.matrix != '[]' }}
+    steps:
+      - name: Checkout test sources
+        uses: actions/checkout@v5
+
+      - name: Download plugin artifacts
+        uses: actions/download-artifact@v5
+        with:
+          name: jars
+          path: ./artifacts
+
+      - name: Select plugin jar
+        id: plugin
+        shell: bash
+        run: |
+          set -euo pipefail
+          PLUGIN_JAR=''
+          while IFS= read -r candidate; do
+            if unzip -p "$candidate" velocity-plugin.json >/dev/null 2>&1; then
+              PLUGIN_JAR="$candidate"
+              break
+            fi
+          done < <(find ./artifacts -type f -name 'Velocidialog-*.jar' \
+            ! -name '*-plain.jar' ! -name '*-sources.jar' ! -name '*-javadoc.jar')
+          test -n "$PLUGIN_JAR"
+          echo "jar=$PLUGIN_JAR" >> "$GITHUB_OUTPUT"
+
+      - name: Download Velocity
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Downloading Velocity ${{ matrix.key }} from ${{ matrix.url }}"
+          curl -fsSL \
+            -H 'User-Agent: Velocidialog GitHub Actions (https://github.com/${{ github.repository }})' \
+            "${{ matrix.url }}" -o ./velocity.jar
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Remember Java 21
+        shell: bash
+        run: echo "JAVA_21_HOME=$JAVA_HOME" >> "$GITHUB_ENV"
+
+      - name: Set up Java 25
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 25
+
+      - name: Remember Java 25
+        shell: bash
+        run: echo "JAVA_25_HOME=$JAVA_HOME" >> "$GITHUB_ENV"
+
+      - name: Set up Gradle caches
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Make Fabric Gradle wrapper executable
+        run: chmod +x tests/fabric-client/gradlew
+
+      - name: Probe Velocity dialog compatibility
+        id: compatibility
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p e2e-results
+
+          VELOCITY_JAVA=21
+          VELOCITY_JAVA_HOME="$JAVA_21_HOME"
+          if [[ "${{ matrix.version }}" == 4.* ]]; then
+            VELOCITY_JAVA=25
+            VELOCITY_JAVA_HOME="$JAVA_25_HOME"
+          fi
+
+          JAVA_HOME="$VELOCITY_JAVA_HOME" tests/fabric-client/gradlew \
+            -p tests/fabric-client compatibilityProbe \
+            -Pvariable=1.21.6 \
+            -PprobeJava="$VELOCITY_JAVA" \
+            -PvelocityJar=../../velocity.jar \
+            --no-daemon --stacktrace | tee compatibility-probe.log
+
+          APPLICABLE=$(sed -n 's/^VELOCIDIALOG_APPLICABLE=//p' compatibility-probe.log | tail -n 1)
+          VARIANTS=$(sed -n 's/^VELOCIDIALOG_VARIANTS=//p' compatibility-probe.log | tail -n 1)
+          test -n "$APPLICABLE"
+          echo "applicable=$APPLICABLE" >> "$GITHUB_OUTPUT"
+          echo "variants=$VARIANTS" >> "$GITHUB_OUTPUT"
+          echo "velocity_java=$VELOCITY_JAVA" >> "$GITHUB_OUTPUT"
+
+          if [ "$APPLICABLE" != true ]; then
+            printf 'Velocity %s is not applicable: ServerboundCustomClickActionPacket is absent.\n' \
+              '${{ matrix.key }}' > e2e-results/not-applicable.txt
+          fi
+
+      - name: Build unpublished Velocity test-driver
+        if: steps.compatibility.outputs.applicable == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          DRIVER_JAVA='${{ steps.compatibility.outputs.velocity_java }}'
+          if [ "$DRIVER_JAVA" = 25 ]; then
+            DRIVER_JAVA_HOME="$JAVA_25_HOME"
+          else
+            DRIVER_JAVA_HOME="$JAVA_21_HOME"
+          fi
+
+          JAVA_HOME="$DRIVER_JAVA_HOME" tests/fabric-client/gradlew \
+            -p tests/fabric-client velocityDriverJar \
+            -Pvariable=1.21.6 \
+            -PdriverJava="$DRIVER_JAVA" \
+            -PvelocityJar=../../velocity.jar \
+            -PpluginJar="../../${{ steps.plugin.outputs.jar }}" \
+            --no-daemon --stacktrace
+
+          mkdir -p plugins
+          cp '${{ steps.plugin.outputs.jar }}' plugins/Velocidialog.jar
+          cp tests/fabric-client/build/e2e/Velocidialog-e2e-driver-1.0.0.jar \
+            plugins/Velocidialog-e2e-driver.jar
+
+      - name: Run compatible clients sequentially
+        if: steps.compatibility.outputs.applicable == 'true'
+        shell: bash
+        env:
+          VELOCIDIALOG_E2E_RESULTS: ${{ github.workspace }}/e2e-results
+          VELOCIDIALOG_E2E_PROXY_HOST: 127.0.0.1
+          VELOCIDIALOG_E2E_PROXY_PORT: 25565
+          VELOCIDIALOG_E2E_BACKEND_PORT: 25566
+        run: |
+          set -euo pipefail
+
+          cp tests/fabric-client/velocity.toml velocity.toml
+          cp tests/fabric-client/forwarding.secret forwarding.secret
+
+          VELOCITY_JAVA_HOME="$JAVA_21_HOME"
+          if [ '${{ steps.compatibility.outputs.velocity_java }}' = 25 ]; then
+            VELOCITY_JAVA_HOME="$JAVA_25_HOME"
+          fi
+
+          "$VELOCITY_JAVA_HOME/bin/java" \
+            -Xms256M -Xmx512M \
+            -Dvelocidialog.e2e.results="$VELOCIDIALOG_E2E_RESULTS" \
+            -jar ./velocity.jar > velocity.log 2>&1 &
+          VELOCITY_PID=$!
+          cleanup() {
+            kill "$VELOCITY_PID" 2>/dev/null || true
+            wait "$VELOCITY_PID" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          for attempt in $(seq 1 120); do
+            if grep -q 'Velocidialog initialized: native dialogs are available' velocity.log \
+              && grep -q 'Done (' velocity.log; then
+              break
+            fi
+            if ! kill -0 "$VELOCITY_PID" 2>/dev/null; then
+              echo '::error::Velocity terminated before the E2E tests started.'
+              cat velocity.log
+              exit 1
+            fi
+            if [ "$attempt" = 120 ]; then
+              echo '::error::Timed out waiting for Velocity and Velocidialog.'
+              cat velocity.log
+              exit 1
+            fi
+            sleep 1
+          done
+
+          IFS=',' read -ra VARIANTS <<< '${{ steps.compatibility.outputs.variants }}'
+          test "${#VARIANTS[@]}" -gt 0
+          copy_tree() {
+            local source="$1"
+            local destination="$2"
+            if [ -d "$source" ]; then
+              mkdir -p "$destination"
+              cp -a "$source/." "$destination/"
+            fi
+          }
+
+          for VARIANT in "${VARIANTS[@]}"; do
+            PROTOCOL=$(sed -n 's/^protocol=//p' \
+              "tests/fabric-client/gradle.${VARIANT}.properties")
+            test -n "$PROTOCOL"
+
+            CLIENT_JAVA_HOME="$JAVA_21_HOME"
+            if [[ "$VARIANT" == 26.* ]]; then
+              CLIENT_JAVA_HOME="$JAVA_25_HOME"
+            fi
+
+            echo "Running Minecraft $VARIANT (protocol $PROTOCOL)"
+            VARIANT_DIAGNOSTICS="$VELOCIDIALOG_E2E_RESULTS/minecraft-$VARIANT"
+            mkdir -p "$VARIANT_DIAGNOSTICS"
+            set +e
+            JAVA_HOME="$CLIENT_JAVA_HOME" \
+              VELOCIDIALOG_E2E_PROTOCOL="$PROTOCOL" \
+              xvfb-run -a tests/fabric-client/gradlew \
+                -p tests/fabric-client runClientGameTest \
+                -Pvariable="$VARIANT" \
+                --no-daemon --stacktrace 2>&1 \
+              | tee "$VARIANT_DIAGNOSTICS/gradle.log"
+            TEST_EXIT=${PIPESTATUS[0]}
+            set -e
+
+            copy_tree tests/fabric-client/build/run/clientGameTest/logs \
+              "$VARIANT_DIAGNOSTICS/client-logs"
+            copy_tree tests/fabric-client/build/run/clientGameTest/crash-reports \
+              "$VARIANT_DIAGNOSTICS/client-crash-reports"
+            copy_tree tests/fabric-client/build/run/clientGameTest/screenshots \
+              "$VARIANT_DIAGNOSTICS/client-screenshots"
+            copy_tree tests/fabric-client/run/clientGameTest/logs \
+              "$VARIANT_DIAGNOSTICS/client-logs"
+            copy_tree tests/fabric-client/run/clientGameTest/crash-reports \
+              "$VARIANT_DIAGNOSTICS/client-crash-reports"
+            copy_tree tests/fabric-client/run/clientGameTest/screenshots \
+              "$VARIANT_DIAGNOSTICS/client-screenshots"
+            if [ "$TEST_EXIT" -ne 0 ]; then
+              echo "::error::Minecraft $VARIANT Client Game Test failed."
+              exit "$TEST_EXIT"
+            fi
+            test -f "$VELOCIDIALOG_E2E_RESULTS/config-${PROTOCOL}.ok"
+            test -f "$VELOCIDIALOG_E2E_RESULTS/play-${PROTOCOL}.ok"
+            test -f "$VELOCIDIALOG_E2E_RESULTS/close-${PROTOCOL}.ok"
+          done
+
+      - name: Upload Velocity and Fabric diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-${{ strategy.job-index }}-${{ matrix.id }}
+          if-no-files-found: ignore
+          retention-days: 14
+          include-hidden-files: true
+          path: |
+            compatibility-probe.log
+            velocity.log
+            logs/**
+            crash-reports/**
+            e2e-results/**
+            tests/fabric-client/run/**/logs/**
+            tests/fabric-client/run/**/crash-reports/**
+            tests/fabric-client/run/**/screenshots/**
+            tests/fabric-client/build/reports/**
+            tests/fabric-client/build/run/clientGameTest/logs/**
+            tests/fabric-client/build/run/clientGameTest/crash-reports/**
+            tests/fabric-client/build/run/clientGameTest/screenshots/**
+            tests/fabric-client/build/runClientGameTest/**/logs/**
+            tests/fabric-client/build/runClientGameTest/**/crash-reports/**
+            tests/fabric-client/build/runClientGameTest/**/screenshots/**
+
+      - name: Create Markdown report
+        if: failure() && inputs.report_latest_release != ''
+        shell: bash
+        run: |
+          cat > failure-report.md <<EOF
+          ---
+          title: Velocidialog ${{ inputs.report_latest_release }} test failure for Velocity ${{ matrix.key }}
+          assignees: code-lime
+          labels: bug
+          ---
+          # Test failure report
+
+          **Velocity build:** ${{ matrix.key }}
+          **Velocity build URL:** [Download](${{ matrix.url }})
+          **Velocidialog release:** ${{ inputs.report_latest_release }}
+          **Diagnostics:** [workflow artifacts](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+          The released plugin failed its compatibility probe or a real Fabric Client Game Test.
+          Velocity/Fabric logs, crash reports, screenshots, and result markers are attached to the workflow run.
+          EOF
+
+      - name: Create issue on failure
+        if: failure() && inputs.report_latest_release != ''
+        uses: JasonEtco/create-an-issue@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          filename: failure-report.md

@@ -1,0 +1,1 @@
+{"type":"minecraft:confirmation","title":"Confirm","yes":{"label":"Yes","action":{"type":"minecraft:show_dialog","dialog":{"type":"minecraft:notice","title":"Nested"}}},"no":{"label":"No","action":{"type":"minecraft:open_url","url":"https://example.com"}}}

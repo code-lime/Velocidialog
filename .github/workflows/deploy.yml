@@ -1,0 +1,411 @@
+name: Publish to GitHub Packages
+
+on:
+  push:
+    tags: [ "*" ]
+    branches: [ "master" ]
+    paths-ignore:
+      - .github/workflows/scripts/**
+      - .github/workflows/testing.yml
+      - README.md
+  pull_request:
+    branches: [ "master" ]
+    paths-ignore:
+      - .github/workflows/scripts/**
+      - .github/workflows/testing.yml
+      - README.md
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  GITHUB_OWNER: ${{ github.repository_owner }}
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  GITHUB_REPOSITORY: ${{ github.repository }}
+  GITHUB_PACKAGE_USERNAME: ${{ github.repository_owner }}
+  GITHUB_PACKAGE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Read CHANGELOG.md
+        id: changelog
+        if: github.ref_type == 'tag'
+        run: |
+          CHANGELOG_OUT=CHANGELOG_TAG.md
+
+          if [ ! -f "CHANGELOG.md" ]; then
+            echo "❌ CHANGELOG.md not found!"
+            exit 1
+          fi
+          
+          if ! grep -q "^## [0-9]" CHANGELOG.md; then
+            echo "❌ No version sections found in CHANGELOG.md"
+            exit 1
+          fi
+          
+          echo "✅ CHANGELOG.md has correct format"
+          
+          VERSION=$GITHUB_REF_NAME
+          echo "Looking for version: $VERSION"
+          
+          if grep -q "^## $VERSION" CHANGELOG.md; then
+            # Extract content from version section using sed
+            sed -n "/^## $VERSION$/,/^## /p" CHANGELOG.md > "$CHANGELOG_OUT"
+            # Remove the version header line
+            sed -i "/^## $VERSION$/d" "$CHANGELOG_OUT"
+            # Remove the closing range marker only when a following version header exists.
+            # For the first release there is no following header, so deleting unconditionally
+            # would discard the final changelog entry.
+            if tail -n 1 "$CHANGELOG_OUT" | grep -q '^## '; then
+              sed -i '$d' "$CHANGELOG_OUT"
+            fi
+            # Remove empty lines at beginning and end
+            sed -i '/^$/N;/^\n$/d' "$CHANGELOG_OUT"
+            
+            if [ -s "$CHANGELOG_OUT" ]; then
+              echo "CHANGELOG=$CHANGELOG_OUT" >> $GITHUB_OUTPUT
+              echo "✅ Extracted changelog for version $VERSION"
+              echo "Changelog content:"
+              cat "$CHANGELOG_OUT"
+            else
+              echo "❌ Changelog for version $VERSION is empty"
+              echo "Debug: Raw extraction:"
+              sed -n "/^## $VERSION$/,/^## /p" CHANGELOG.md
+              exit 1
+            fi
+          else
+            echo "❌ Section with version $VERSION not found in CHANGELOG.md"
+            echo "Available versions:"
+            grep "^## " CHANGELOG.md
+            exit 1
+          fi
+
+      - name: Read DEPENDENCIES.md
+        id: dependencies
+        if: github.ref_type == 'tag'
+        run: |
+          DEPENDENCIES_OUT=dependencies.json
+
+          if [ ! -f "DEPENDENCIES.md" ]; then
+            echo "⚠️ DEPENDENCIES.md not found, using empty dependencies"
+            echo "[]" > "$DEPENDENCIES_OUT"
+            echo "DEPENDENCIES=$DEPENDENCIES_OUT" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          if grep -q "^## " DEPENDENCIES.md; then
+            echo "✅ Marketplace dependency sections found"
+          else
+            echo "ℹ️ No marketplace dependency sections found; publishing with no plugin dependencies"
+          fi
+          
+          # Create empty JSON array
+          echo "[]" > "$DEPENDENCIES_OUT"
+          
+          # Helper function to save dependency to JSON
+          save_dependency() {
+            local name="$1"
+            local pid="$2"
+            local url="$3"
+            local type="$4"
+            
+            if [ -z "$pid" ]; then
+              echo "⚠️ Skipping '$name' - no project_id"
+              return
+            fi
+            
+            # Normalize type
+            [ "$type" != "required" ] && type="optional"
+            
+            echo "✅ Adding dependency: name='$name', project_id='$pid', url='$url', type='$type'"
+            
+            jq --arg name "$name" --arg pid "$pid" --arg url "$url" --arg type "$type" \
+              '. += [{"name": $name, "project_id": $pid, "url": $url, "dependency_type": $type}]' \
+              "$DEPENDENCIES_OUT" > "${DEPENDENCIES_OUT}.tmp" && mv "${DEPENDENCIES_OUT}.tmp" "$DEPENDENCIES_OUT"
+          }
+          
+          # Parse dependencies - single pass through file
+          current_name=""
+          current_project_id=""
+          current_url=""
+          current_type="optional"
+          
+          while IFS= read -r line; do
+            # Check if it's a section header
+            if [[ $line =~ ^##[[:space:]]+(.+)$ ]]; then
+              # Save previous dependency if we have one
+              if [ -n "$current_name" ]; then
+                save_dependency "$current_name" "$current_project_id" "$current_url" "$current_type"
+              fi
+              
+              # Start new dependency
+              current_name="${BASH_REMATCH[1]}"
+              current_project_id=""
+              current_url=""
+              current_type="optional"
+              
+            # Check for Project ID
+            elif [[ $line =~ \*\*Project[[:space:]]ID\*\*:[[:space:]]+(.+)$ ]]; then
+              current_project_id="${BASH_REMATCH[1]}"
+              
+            # Check for URL
+            elif [[ $line =~ \*\*URL\*\*:[[:space:]]+(.+)$ ]]; then
+              current_url="${BASH_REMATCH[1]}"
+              
+            # Check for Type
+            elif [[ $line =~ \*\*Type\*\*:[[:space:]]+(.+)$ ]]; then
+              current_type="${BASH_REMATCH[1]}"
+            fi
+          done < DEPENDENCIES.md
+          
+          # Save last dependency
+          if [ -n "$current_name" ]; then
+            save_dependency "$current_name" "$current_project_id" "$current_url" "$current_type"
+          fi
+          
+          LENGTH=$(jq -r 'length' "$DEPENDENCIES_OUT" 2>/dev/null || echo "0")
+          
+          if [ -s "$DEPENDENCIES_OUT" ] && [ "$LENGTH" -gt 0 ]; then
+            echo "DEPENDENCIES=$DEPENDENCIES_OUT" >> $GITHUB_OUTPUT
+            echo "✅ Extracted dependencies"
+            echo "Dependencies content:"
+            cat "$DEPENDENCIES_OUT"
+          else
+            echo "⚠️ No valid dependencies found in DEPENDENCIES.md, using empty dependencies"
+            echo "[]" > "$DEPENDENCIES_OUT"
+            echo "DEPENDENCIES=$DEPENDENCIES_OUT" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set up JDK 25 compiler and JDK 21 Gradle runtime
+        uses: actions/setup-java@v4
+        with:
+          java-version: |
+            25
+            21
+          distribution: 'temurin'
+
+      - name: Make Gradle Wrapper Executable
+        run: chmod +x gradlew
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: wrapper
+
+      - name: Build
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            ./gradlew clean build -PpluginVersion="${GITHUB_REF_NAME}"
+          else
+            ./gradlew clean build
+          fi
+
+      - name: Select distribution jars
+        id: output_jar
+        run: |
+          set -euo pipefail
+          PLUGIN_JAR=$(find build/libs -maxdepth 1 -type f -name 'Velocidialog-*.jar' \
+            ! -name '*-plain.jar' \
+            ! -name '*-sources.jar' \
+            ! -name '*-javadoc.jar' | head -n 1)
+          test -n "$PLUGIN_JAR"
+          echo "JAR=$PLUGIN_JAR" >> "$GITHUB_OUTPUT"
+
+      - name: Extract metadata
+        id: metadata
+        run: |
+          JAR_PATH=${{ steps.output_jar.outputs.JAR }}
+          JSON_IN_JAR=velocity-plugin.json
+          JSON_OUT=build/libs/metadata.json
+      
+          unzip -p "$JAR_PATH" "$JSON_IN_JAR" > "$JSON_OUT"
+      
+          if [ -s "$JSON_OUT" ]; then
+            echo "METADATA=$JSON_OUT" >> $GITHUB_OUTPUT
+          else
+            echo "JSON file not found or empty!"
+            exit 1
+          fi
+
+      - name: Upload archive to artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: jars
+          path: |
+            ${{ steps.output_jar.outputs.JAR }}
+            ${{ steps.metadata.outputs.METADATA }}
+
+      - name: Upload changelog to artifact
+        if: github.ref_type == 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: changelog
+          path: ${{ steps.changelog.outputs.CHANGELOG }}
+
+      - name: Upload dependencies to artifact
+        if: github.ref_type == 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: dependencies
+          path: ${{ steps.dependencies.outputs.DEPENDENCIES }}
+
+      - name: Fetch velocity builds for tests to matrix
+        if: github.ref_type == 'tag'
+        id: set-matrix
+        uses: actions/github-script@v8
+        env:
+          SCRIPT_FILE: '.github/workflows/scripts/fetch-builds.js'
+        with:
+          script: await require(process.env.SCRIPT_FILE)({ github, context, core });
+  tests:
+    needs: build
+    if: github.ref_type == 'tag'
+    uses: ./.github/workflows/velocity-test.yml
+    with:
+      matrix: ${{ needs.build.outputs.matrix }}
+  publish:
+    runs-on: ubuntu-latest
+    needs: tests
+    if: github.ref_type == 'tag'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 25 compiler and JDK 21 Gradle runtime
+        uses: actions/setup-java@v4
+        with:
+          java-version: |
+            25
+            21
+          distribution: 'temurin'
+
+      - name: Make Gradle Wrapper Executable
+        run: chmod +x gradlew
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: wrapper
+
+      - name: Publish Maven package
+        run: ./gradlew publish -PpluginVersion="${GITHUB_REF_NAME}"
+
+      - name: Download changelog from artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: changelog
+          path: .
+      - name: Read changelog
+        id: changelog
+        run: |
+          CHANGELOG_OUT=CHANGELOG_TAG.md
+          if [ -f "$CHANGELOG_OUT" ]; then
+            CHANGELOG_CONTENT=$(cat "$CHANGELOG_OUT")
+            echo "CHANGELOG<<EOF" >> $GITHUB_OUTPUT
+            echo "$CHANGELOG_CONTENT" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          else
+            echo "CHANGELOG=No changelog found" >> $GITHUB_OUTPUT
+          fi
+      - name: Download dependencies from artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dependencies
+          path: .
+      - name: Read dependencies
+        id: dependencies
+        run: |
+          DEPENDENCIES_OUT=dependencies.json
+          HANGAR_DEPS_FILE=hangar_dependencies.json
+          
+          if [ -f "$DEPENDENCIES_OUT" ]; then
+            DEPENDENCIES_CONTENT=$(cat "$DEPENDENCIES_OUT")
+            echo "MODRINTH_DEPENDENCIES<<EOF" >> $GITHUB_OUTPUT
+            echo "$DEPENDENCIES_CONTENT" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+            
+            # Also prepare Hangar format
+            LENGTH=$(jq -r 'length' "$DEPENDENCIES_OUT" 2>/dev/null || echo "0")
+            if [ "$LENGTH" -gt 0 ]; then
+              # Convert to Hangar format
+              jq -r 'map({
+                "name": .name,
+                "required": (.dependency_type == "required"),
+                "externalUrl": .url
+              })' "$DEPENDENCIES_OUT" > "$HANGAR_DEPS_FILE"
+              
+              HANGAR_DEPS_CONTENT=$(cat "$HANGAR_DEPS_FILE")
+              echo "HANGAR_DEPENDENCIES<<EOF" >> $GITHUB_OUTPUT
+              echo "$HANGAR_DEPS_CONTENT" >> $GITHUB_OUTPUT
+              echo "EOF" >> $GITHUB_OUTPUT
+            else
+              echo "HANGAR_DEPENDENCIES=[]" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "MODRINTH_DEPENDENCIES=[]" >> $GITHUB_OUTPUT
+            echo "HANGAR_DEPENDENCIES=[]" >> $GITHUB_OUTPUT
+          fi
+      - name: Download archive's from artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: jars
+          path: .
+      - name: Read metadata
+        id: metadata
+        run: |
+          CONFIG_FILE=metadata.json
+
+          jq -r '.name as $v | "name=\($v)"' "$CONFIG_FILE" >> "$GITHUB_OUTPUT"
+          jq -r '.version as $v | "version=\($v)"' "$CONFIG_FILE" >> "$GITHUB_OUTPUT"
+      - name: Select release jars
+        id: jars
+        run: |
+          set -euo pipefail
+          PLUGIN_JAR=$(find . -maxdepth 1 -type f -name 'Velocidialog-*.jar' \
+            ! -name '*-plain.jar' \
+            ! -name '*-sources.jar' \
+            ! -name '*-javadoc.jar' | head -n 1)
+          test -n "$PLUGIN_JAR"
+          FILES=$(printf '%s\n' "$PLUGIN_JAR" | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          echo "files=$FILES" >> "$GITHUB_OUTPUT"
+          echo "plugin=$PLUGIN_JAR" >> "$GITHUB_OUTPUT"
+          echo "plugin_name=$(basename "$PLUGIN_JAR")" >> "$GITHUB_OUTPUT"
+      - name: Modrinth Release
+        uses: cloudnode-pro/modrinth-publish@v2
+        with:
+          project: ${{ vars.MODRINTH_PROJECT_ID }}
+          version: ${{ steps.metadata.outputs.version }}
+          changelog: ${{ steps.changelog.outputs.CHANGELOG }}
+          dependencies: ${{ steps.dependencies.outputs.MODRINTH_DEPENDENCIES }}
+          loaders: 'velocity'
+          game-versions: '["${{ vars.MODRINTH_MINECRAFT_VERSION }}"]'
+          token: ${{ secrets.MODRINTH_TOKEN }}
+          files: ${{ steps.jars.outputs.files }}
+          primary-file: ${{ steps.jars.outputs.plugin_name }}
+      - name: Hangar Release
+        uses: milkdrinkers/Hangar-Publish@v2
+        with:
+          slug: ${{ vars.HANGAR_PROJECT_ID }}
+          version: ${{ steps.metadata.outputs.version }}
+          channel: 'Release'
+          description: ${{ steps.changelog.outputs.CHANGELOG }}
+          api_token: ${{ secrets.HANGAR_TOKEN }}
+          platform_dependencies: '{"VELOCITY":["${{ vars.HANGAR_VELOCITY_VERSION }}"]}'
+          plugin_dependencies: '{"VELOCITY":${{ steps.dependencies.outputs.HANGAR_DEPENDENCIES }}}'
+          files: '[{"path":"${{ steps.jars.outputs.plugin }}","platforms":["VELOCITY"]}]'
+      - name: GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body: ${{ steps.changelog.outputs.CHANGELOG }}
+          files: ${{ steps.jars.outputs.plugin }}

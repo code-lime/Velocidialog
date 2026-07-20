@@ -1,0 +1,166 @@
+plugins {
+    id 'net.fabricmc.fabric-loom-remap' version '1.17.16' apply false
+    id 'net.fabricmc.fabric-loom' version '1.17.16' apply false
+}
+
+def variable = providers.gradleProperty('variable').getOrElse('1.21.6')
+def configFile = file("gradle.${variable}.properties")
+if (!configFile.exists()) {
+    throw new GradleException("Unknown Minecraft test variant '${variable}'")
+}
+
+def variantProperties = new Properties()
+configFile.withInputStream { variantProperties.load(it) }
+variantProperties.each { key, value -> project.ext.set(key.toString(), value.toString()) }
+
+def driverJava = providers.gradleProperty('driverJava')
+        .map { it.toInteger() }
+        .getOrElse(versionJava.toInteger())
+def probeJava = providers.gradleProperty('probeJava')
+        .map { it.toInteger() }
+        .getOrElse(versionJava.toInteger())
+
+apply plugin: remap.toBoolean()
+        ? 'net.fabricmc.fabric-loom-remap'
+        : 'net.fabricmc.fabric-loom'
+
+group = 'org.lime.velocidialog.e2e'
+version = '1.0.0'
+
+repositories {
+    mavenCentral()
+    maven { url = 'https://maven.fabricmc.net/' }
+}
+
+java {
+    toolchain.languageVersion = JavaLanguageVersion.of(versionJava.toInteger())
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${versionMinecraft}"
+    if (remap.toBoolean()) {
+        mappings loom.officialMojangMappings()
+        modImplementation "net.fabricmc:fabric-loader:${versionLoader}"
+        modImplementation "net.fabricmc.fabric-api:fabric-api:${versionFabric}"
+    } else {
+        implementation "net.fabricmc:fabric-loader:${versionLoader}"
+        implementation "net.fabricmc.fabric-api:fabric-api:${versionFabric}"
+    }
+}
+
+fabricApi {
+    configureTests {
+        createSourceSet = true
+        modId = 'velocidialog-client-gametest'
+        enableGameTests = false
+        enableClientGameTests = true
+        eula = true
+    }
+}
+
+sourceSets {
+    velocityDriver
+    compatibilityProbe
+}
+
+def velocityJar = providers.gradleProperty('velocityJar')
+        .map { layout.projectDirectory.file(it) }
+        .orElse(layout.projectDirectory.file('velocity.jar'))
+def pluginJar = providers.gradleProperty('pluginJar')
+        .map { layout.projectDirectory.file(it) }
+        .orElse(layout.projectDirectory.file('Velocidialog.jar'))
+
+dependencies {
+    velocityDriverCompileOnly files(velocityJar, pluginJar)
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release = versionJava.toInteger()
+}
+
+tasks.named('compileVelocityDriverJava', JavaCompile) {
+    // Velocity 4 classes require a Java 25 compiler to read, but the unpublished driver itself
+    // only uses Java 21 language/API features and remains loadable on Velocity 3.
+    options.release = 21
+    javaCompiler = javaToolchains.compilerFor {
+        languageVersion = JavaLanguageVersion.of(driverJava)
+    }
+    doFirst {
+        [velocityJar.get().asFile, pluginJar.get().asFile].each { input ->
+            if (!input.isFile()) {
+                throw new GradleException("Missing Velocity driver compile input: ${input}")
+            }
+        }
+    }
+}
+
+tasks.named('compileCompatibilityProbeJava', JavaCompile) {
+    options.release = 21
+    javaCompiler = javaToolchains.compilerFor {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+tasks.register('velocityDriverJar', Jar) {
+    dependsOn tasks.named('velocityDriverClasses')
+    archiveBaseName = 'Velocidialog-e2e-driver'
+    archiveClassifier = ''
+    destinationDirectory = layout.buildDirectory.dir('e2e')
+    from sourceSets.velocityDriver.output
+}
+
+tasks.register('compatibilityProbe', JavaExec) {
+    dependsOn tasks.named('compatibilityProbeClasses')
+    classpath = sourceSets.compatibilityProbe.runtimeClasspath
+    mainClass = 'org.lime.velocidialog.e2e.VelocityCompatibilityProbe'
+    javaLauncher = javaToolchains.launcherFor {
+        languageVersion = JavaLanguageVersion.of(probeJava)
+    }
+    doFirst {
+        args = [velocityJar.get().asFile.absolutePath]
+    }
+}
+
+tasks.named('runClientGameTest', JavaExec) {
+    jvmArgs '-Dfabric.client.gametest.disableNetworkSynchronizer=true'
+    doFirst {
+        final File results = System.getenv('VELOCIDIALOG_E2E_RESULTS')
+                ? file(System.getenv('VELOCIDIALOG_E2E_RESULTS'))
+                : layout.buildDirectory.dir('e2e-results').get().asFile
+        results.mkdirs()
+        ["${protocol}.failure", "client-play-ready-${protocol}",
+                "client-play-submit-ready-${protocol}",
+                "client-close-show-ready-${protocol}",
+                "client-close-ready-${protocol}",
+                "config-${protocol}.ok", "play-${protocol}.ok",
+                "close-${protocol}.ok"].each { marker ->
+            delete new File(results, marker)
+        }
+        environment 'VELOCIDIALOG_E2E_RESULTS', results.absolutePath
+        environment 'VELOCIDIALOG_E2E_PROTOCOL', protocol
+    }
+    doLast {
+        final File results = System.getenv('VELOCIDIALOG_E2E_RESULTS')
+                ? file(System.getenv('VELOCIDIALOG_E2E_RESULTS'))
+                : layout.buildDirectory.dir('e2e-results').get().asFile
+        final File failure = new File(results, "${protocol}.failure")
+        if (failure.isFile()) {
+            throw new GradleException(
+                    "Velocity E2E driver failed for protocol ${protocol}:\n${failure.text}")
+        }
+        final List<String> expected = [
+                "config-${protocol}.ok", "play-${protocol}.ok", "close-${protocol}.ok"]
+        final List<String> missing = expected.findAll { marker ->
+            !new File(results, marker).isFile()
+        }
+        if (!missing.isEmpty()) {
+            throw new GradleException(
+                    "Client Game Test did not produce result markers: ${missing.join(', ')}")
+        }
+    }
+}
+
+apply from: 'sourcegenerator.gradle'
+
+logger.lifecycle("Velocidialog client test variant: Minecraft ${versionMinecraft}, protocol ${protocol}, Java ${versionJava}")

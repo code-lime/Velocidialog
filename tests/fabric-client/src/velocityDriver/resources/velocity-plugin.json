@@ -1,0 +1,14 @@
+{
+  "id": "velocidialog-e2e-driver",
+  "name": "Velocidialog E2E Driver",
+  "version": "1.0.0",
+  "description": "Unpublished Velocity-side fixture for Fabric client game tests",
+  "authors": ["Lime"],
+  "dependencies": [
+    {
+      "id": "velocidialog",
+      "optional": false
+    }
+  ],
+  "main": "org.lime.velocidialog.e2e.VelocidialogE2EDriver"
+}

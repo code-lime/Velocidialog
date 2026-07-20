@@ -1,0 +1,134 @@
+import java.nio.charset.StandardCharsets
+import java.nio.file.Files
+import java.util.regex.Pattern
+
+/**
+ * Local, dependency-free form of org.lime.core's source generator syntax. Templates keep the
+ * same //#switch, //#case, //#caseof, //#caseofregex, //#default, //#endswitch and //OF// markers
+ * used by org.lime.rime.utility. Generated sources are variant-specific so concurrent builds do
+ * not rewrite tracked Java files.
+ */
+def selectedMinecraft = project.property('versionMinecraft').toString()
+def templateRoot = layout.projectDirectory.dir('src/gametestTemplate/java')
+def generatedRoot = layout.buildDirectory.dir(
+        "generated/sources/gametest/${selectedMinecraft}")
+
+sourceSets.named('gametest') {
+    java.setSrcDirs([generatedRoot])
+}
+
+def generator = tasks.register('generator') {
+    inputs.property('versionMinecraft', selectedMinecraft)
+    inputs.files(fileTree(templateRoot).matching { include '**/*.java' })
+    outputs.dir(generatedRoot)
+
+    doLast {
+        final File sourceDirectory = templateRoot.asFile
+        final File destinationDirectory = generatedRoot.get().asFile
+        delete destinationDirectory
+
+        fileTree(sourceDirectory).matching { include '**/*.java' }.files.each { source ->
+            final List<String> original = Files.readAllLines(
+                    source.toPath(), StandardCharsets.UTF_8)
+            final List<String> output = generateSource(
+                    source, original, selectedMinecraft)
+            final def relative = sourceDirectory.toPath().relativize(source.toPath())
+            final def destination = destinationDirectory.toPath().resolve(relative)
+            Files.createDirectories(destination.parent)
+            Files.write(destination, output, StandardCharsets.UTF_8)
+            logger.lifecycle("Generated ${destination} for Minecraft ${selectedMinecraft}")
+        }
+    }
+}
+
+static List<String> generateSource(
+        File source,
+        List<String> original,
+        String selectedMinecraft
+) {
+    final List<String> output = new ArrayList<>(original.size())
+    String selectedValue = null
+    boolean selected = false
+    boolean enabled = true
+    String directiveIndent = ''
+
+    original.eachWithIndex { line, index ->
+        final String trimmed = line.stripLeading()
+        final String indent = line.substring(0, line.length() - trimmed.length())
+        if (trimmed.startsWith('//#switch ')) {
+            if (selectedValue != null) {
+                throw new GradleException(
+                        "${source}:${index + 1}: nested //#switch is unsupported")
+            }
+            final String expression = trimmed.substring('//#switch '.length()).trim()
+            if (expression != 'PROPERTIES.versionMinecraft') {
+                throw new GradleException(
+                        "${source}:${index + 1}: unsupported switch expression ${expression}")
+            }
+            selectedValue = selectedMinecraft
+            selected = false
+            enabled = false
+            directiveIndent = indent
+            output.add(line)
+        } else if (trimmed.startsWith('//#case ')) {
+            requireSwitch(source, index, selectedValue)
+            final String candidate = trimmed.substring('//#case '.length()).trim()
+            enabled = !selected && selectedValue == candidate
+            selected |= enabled
+            directiveIndent = indent
+            output.add(line)
+        } else if (trimmed.startsWith('//#caseof ')) {
+            requireSwitch(source, index, selectedValue)
+            final List<String> candidates =
+                    trimmed.substring('//#caseof '.length()).trim().split(';') as List
+            enabled = !selected && candidates.contains(selectedValue)
+            selected |= enabled
+            directiveIndent = indent
+            output.add(line)
+        } else if (trimmed.startsWith('//#caseofregex ')) {
+            requireSwitch(source, index, selectedValue)
+            final String regex = trimmed.substring('//#caseofregex '.length()).trim()
+            enabled = !selected && Pattern.compile(regex).matcher(selectedValue).find()
+            selected |= enabled
+            directiveIndent = indent
+            output.add(line)
+        } else if (trimmed == '//#default') {
+            requireSwitch(source, index, selectedValue)
+            enabled = !selected
+            selected = true
+            directiveIndent = indent
+            output.add(line)
+        } else if (trimmed == '//#endswitch') {
+            requireSwitch(source, index, selectedValue)
+            selectedValue = null
+            selected = false
+            enabled = true
+            directiveIndent = ''
+            output.add(line)
+        } else if (selectedValue == null || enabled) {
+            output.add(trimmed.startsWith('//OF//')
+                    ? indent + trimmed.substring('//OF//'.length())
+                    : line)
+        } else if (trimmed.startsWith('//OF//')) {
+            output.add(line)
+        } else {
+            output.add(directiveIndent + '//OF//' + line)
+        }
+    }
+
+    if (selectedValue != null) {
+        throw new GradleException("${source}: unclosed //#switch")
+    }
+    return output
+}
+
+static void requireSwitch(File source, int index, String selectedValue) {
+    if (selectedValue == null) {
+        throw new GradleException(
+                "${source}:${index + 1}: switch directive outside //#switch")
+    }
+}
+
+tasks.named('compileGametestJava', JavaCompile) {
+    dependsOn generator
+}

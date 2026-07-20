@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "id": "velocidialog-client-gametest",
+  "version": "1.0.0",
+  "name": "Velocidialog Client GameTest",
+  "environment": "client",
+  "entrypoints": {
+    "fabric-client-gametest": [
+      "org.lime.velocidialog.e2e.VelocidialogClientGameTest"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.19.3",
+    "fabric-api": "*",
+    "minecraft": "*"
+  }
+}

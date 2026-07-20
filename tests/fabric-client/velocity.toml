@@ -1,0 +1,19 @@
+config-version = "2.7"
+bind = "127.0.0.1:25565"
+motd = "<green>Velocidialog E2E</green>"
+show-max-players = 1
+online-mode = false
+force-key-authentication = false
+prevent-client-proxy-connections = false
+forwarding-secret-file = "forwarding.secret"
+player-info-forwarding-mode = "NONE"
+announce-forge = false
+kick-existing-players = true
+ping-passthrough = "DISABLED"
+enable-player-address-logging = true
+
+[servers]
+e2e = "127.0.0.1:25566"
+try = ["e2e"]
+
+[forced-hosts]
