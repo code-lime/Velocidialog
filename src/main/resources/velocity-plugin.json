@@ -1,7 +1,7 @@
 {
   "id": "velocidialog",
   "name": "Velocidialog",
-  "version": "${pluginVersion}",
+  "version": "${version}",
   "description": "Kyori dialog support for Velocity, including CONFIGURATION",
   "authors": ["Lime"],
   "dependencies": [],

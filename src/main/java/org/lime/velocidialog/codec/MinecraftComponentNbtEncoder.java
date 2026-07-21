@@ -123,7 +123,10 @@ public final class MinecraftComponentNbtEncoder {
             if (selector.separator() != null) {
                 output.put("separator", encode(selector.separator(), depth + 1));
             }
-        } else if (component instanceof NBTComponent<?, ?> nbt) {
+        // NBTComponent has two generic parameters in Adventure 4 and one in
+        // Adventure 5. Its erased JVM contract is unchanged, so keep this use
+        // raw to produce one binary that links on both Velocity generations.
+        } else if (component instanceof NBTComponent nbt) {
             output.putString("nbt", nbt.nbtPath());
             if (nbt.interpret()) {
                 output.put("interpret", booleanTag(true));
@@ -138,7 +141,8 @@ public final class MinecraftComponentNbtEncoder {
             } else if (nbt instanceof StorageNBTComponent storage) {
                 output.putString("storage", storage.storage().asString());
             } else {
-                throw new DialogEncodingException("Unknown NBT component " + component.getClass().getName());
+                throw new DialogEncodingException(
+                        "Unknown NBT component " + ((Object) component).getClass().getName());
             }
         } else if (component instanceof ObjectComponent object) {
             encodeObject(output, object.contents());
@@ -147,7 +151,8 @@ public final class MinecraftComponentNbtEncoder {
                 output.put("fallback", encode(fallback, depth + 1));
             }
         } else {
-            throw new DialogEncodingException("Unsupported component type " + component.getClass().getName());
+            throw new DialogEncodingException(
+                    "Unsupported component type " + ((Object) component).getClass().getName());
         }
     }
 
@@ -306,7 +311,7 @@ public final class MinecraftComponentNbtEncoder {
 
     private static void encodeObject(final CompoundBinaryTag.Builder output, final ObjectContents contents) {
         if (contents instanceof SpriteObjectContents sprite) {
-            if (!sprite.atlas().equals(SpriteObjectContents.DEFAULT_ATLAS)) {
+            if (!((Object) sprite.atlas()).equals(SpriteObjectContents.DEFAULT_ATLAS)) {
                 output.putString("atlas", sprite.atlas().asString());
             }
             output.putString("sprite", sprite.sprite().asString());
@@ -344,7 +349,8 @@ public final class MinecraftComponentNbtEncoder {
             }
             return;
         }
-        throw new DialogEncodingException("Unsupported object contents " + contents.getClass().getName());
+        throw new DialogEncodingException(
+                "Unsupported object contents " + ((Object) contents).getClass().getName());
     }
 
     private static String requireUntrustedUri(final String value) {

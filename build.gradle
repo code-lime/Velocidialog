@@ -1,15 +1,11 @@
+import org.gradle.api.attributes.java.TargetJvmVersion
+import ru.vyarus.gradle.plugin.animalsniffer.signature.BuildSignatureTask
+
 buildscript {
-    repositories {
-        gradlePluginPortal()
-        mavenCentral()
-    }
-    dependencies {
-        classpath 'com.github.johnrengelman:shadow:8.1.1'
-    }
     configurations.classpath.resolutionStrategy.eachDependency { details ->
         if (details.requested.group == 'org.ow2.asm') {
             details.useVersion '9.8'
-            details.because 'Shadow 8 must parse and relocate Java 21 class files'
+            details.because 'Shadow plugin needs ASM ≥9.8 to parse Java 25 classes'
         }
     }
 }
@@ -17,58 +13,175 @@ buildscript {
 plugins {
     id 'java-library'
     id 'maven-publish'
+    id "fr.brouillard.oss.gradle.jgitver" version "+"
+    id "com.github.johnrengelman.shadow" version "+"
+    id "ru.vyarus.animalsniffer" version "2.0.1"
 }
 
-apply plugin: 'com.github.johnrengelman.shadow'
-
-group = 'org.lime'
-version = providers.gradleProperty('pluginVersion').getOrElse('1.0.0-SNAPSHOT')
-
+//<editor-fold desc="Settings: Plugin">
 repositories {
     mavenCentral()
-    maven { url = 'https://repo.papermc.io/repository/maven-public/' }
+    maven {
+        url = 'https://repo.papermc.io/repository/maven-public/'
+    }
+}
+dependencies {
+    compileOnly "com.velocitypowered:velocity-api:${versionVelocity}"
+    annotationProcessor "com.velocitypowered:velocity-api:${versionVelocity}"
 }
 
+apply from: 'https://raw.githubusercontent.com/code-lime/org.lime.core/refs/tags/3.1.1/global.gradle'
+apply from: 'https://raw.githubusercontent.com/code-lime/org.lime.core/refs/tags/3.1.1/version.gradle'
+apply from: 'https://raw.githubusercontent.com/code-lime/org.lime.core/refs/tags/3.1.1/remote.gradle'
+
+//<editor-fold desc="Settings: Plugin: MultiVersion Validator">
+
+// Velocity 4 requires Java 25 to compile against, but the plugin bytecode stays at Java 21.
+def compilerJavaVersion = providers.gradleProperty('javaCompilerVersion').get().toInteger()
 java {
-    toolchain.languageVersion = JavaLanguageVersion.of(21)
-    withSourcesJar()
+    toolchain.languageVersion = JavaLanguageVersion.of(compilerJavaVersion)
     withJavadocJar()
 }
 
-configurations {
-    shade
-    implementation.extendsFrom(shade)
+// These classpaths are used only by javac. Gradle must not reject the Java 25
+// Velocity API before the Java 25 compiler can read it.
+[configurations.compileClasspath, configurations.annotationProcessor].each { configuration ->
+    configuration.attributes {
+        attribute(TargetJvmVersion.TARGET_JVM_VERSION_ATTRIBUTE, compilerJavaVersion)
+    }
 }
 
+// Complete minimum-runtime classpath used to build the Velocity 3.4 API
+// signature. Production sources are compiled only once against Velocity 4.
+configurations {
+    velocity34Api
+}
 dependencies {
-    compileOnly "com.velocitypowered:velocity-api:${velocityVersion}"
+    velocity34Api "com.velocitypowered:velocity-api:${versionVelocity34}"
+    velocity34Api "net.kyori:adventure-nbt:${versionAdventure}"
+    velocity34Api "io.netty:netty-buffer:${versionNetty}"
+    velocity34Api "io.netty:netty-common:${versionNetty}"
+    velocity34Api "io.netty:netty-transport:${versionNetty}"
+    velocity34Api "net.bytebuddy:byte-buddy:${versionByteBuddy}"
+    velocity34Api "net.bytebuddy:byte-buddy-agent:${versionByteBuddy}"
+    velocity34Api 'org.jetbrains:annotations:26.0.2'
+    velocity34Api 'org.jspecify:jspecify:1.0.0'
+    velocity34Api 'org.checkerframework:checker-qual:3.49.2'
+}
 
-    // These annotations are part of the Paper-shaped public dialog API. Keep them as
-    // API metadata without packaging duplicate annotation classes in the plugin jar.
+// Inspect production bytecode against Velocity 3.4. This detects JVM
+// descriptor changes that source compilation against Velocity 4 cannot see.
+def velocity34ApiSignature = tasks.register('velocity34ApiSignature', BuildSignatureTask) {
+    description = "Builds an API signature for the Velocity ${versionVelocity34} runtime"
+    files configurations.velocity34Api
+    outputName = 'velocity34-api'
+}
+
+animalsniffer {
+    toolVersion = '1.27'
+    defaultTargets 'main'
+    signatures = velocity34ApiSignature.map { it.outputFiles }.get()
+
+    // Otherwise jars from the newer main compile classpath would make every
+    // new API reference appear valid and mask incompatibilities.
+    excludeJars '*'
+
+    // Java 9+ runtime signatures are not published by Animal Sniffer. JDK API
+    // compatibility is enforced by --release from global.gradle.
+    ignore = [
+            'java.*',
+            'javax.*',
+            'jdk.*',
+            'sun.*',
+            'com.sun.*',
+            'org.ietf.*',
+            'org.w3c.*',
+            'org.xml.*',
+    ]
+}
+
+tasks.register('validateVelocity34BinaryCompatibility') {
+    group = 'verification'
+    description = "Checks production bytecode against the Velocity ${versionVelocity34} runtime"
+    dependsOn tasks.named('animalsnifferMain')
+}
+tasks.named('check') {
+    dependsOn tasks.named('validateVelocity34BinaryCompatibility')
+}
+//</editor-fold>
+
+println "Project version: $version"
+
+configureProcessResources(
+        tasks.named('processResources', ProcessResources).get(),
+        'velocity-plugin.json',
+        [:])
+tasks.withType(org.gradle.jvm.tasks.Jar).configureEach {
+    archiveBaseName.set(project.name)
+}
+//</editor-fold>
+
+configurations {
+    relocate
+}
+
+//<editor-fold desc="Settings: Libraries">
+//<editor-fold desc="Settings: Libraries: Annotations">
+dependencies {
+    // These annotations are part of the Paper-shaped public dialog API. Keep
+    // them as API metadata without packaging duplicate annotation classes.
     compileOnlyApi 'org.jetbrains:annotations:26.0.2'
     compileOnlyApi 'org.jspecify:jspecify:1.0.0'
     compileOnlyApi 'org.checkerframework:checker-qual:3.49.2'
+}
+//</editor-fold>
+//<editor-fold desc="Settings: Libraries: Adventure NBT">
+dependencies {
+    // CompoundBinaryTag is public API. Some Velocity distributions do not
+    // provide adventure-nbt, so the same module is embedded without relocation.
+    api "net.kyori:adventure-nbt:${versionAdventure}"
+    relocate "net.kyori:adventure-nbt:${versionAdventure}"
+}
+//</editor-fold>
+//<editor-fold desc="Settings: Libraries: Netty">
+dependencies {
+    compileOnly "io.netty:netty-buffer:${versionNetty}"
+    compileOnly "io.netty:netty-common:${versionNetty}"
+    compileOnly "io.netty:netty-transport:${versionNetty}"
+}
+//</editor-fold>
+//<editor-fold desc="Settings: Libraries: Byte Buddy">
+dependencies {
+    compileOnly "net.bytebuddy:byte-buddy:${versionByteBuddy}"
+    compileOnly "net.bytebuddy:byte-buddy-agent:${versionByteBuddy}"
+    relocate "net.bytebuddy:byte-buddy:${versionByteBuddy}"
+    relocate "net.bytebuddy:byte-buddy-agent:${versionByteBuddy}"
+}
+shadowJar {
+    // ByteBuddyAgent self-attachment resolves these exact names. AgentBuilder
+    // comes from byte-buddy core and remains safely relocated.
+    relocate('net.bytebuddy', 'org.lime.velocidialog.internal.bytebuddy') {
+        exclude 'net/bytebuddy/agent/Attacher*'
+        exclude 'net/bytebuddy/agent/ByteBuddyAgent*'
+        exclude 'net/bytebuddy/agent/Installer*'
+        exclude 'net/bytebuddy/agent/VirtualMachine*'
+        exclude 'net/bytebuddy/agent/package-info*'
+        exclude 'net/bytebuddy/agent/utility/**'
+    }
+}
+//</editor-fold>
+//</editor-fold>
 
-    // CompoundBinaryTag is public API. Some Velocity distributions expose adventure-nbt and some
-    // do not, so it is also embedded below without relocation; parent-first loading remains safe.
-    api "net.kyori:adventure-nbt:${adventureVersion}"
-
-    compileOnly "io.netty:netty-buffer:${nettyVersion}"
-    compileOnly "io.netty:netty-common:${nettyVersion}"
-    compileOnly "io.netty:netty-transport:${nettyVersion}"
-
-    shade "net.bytebuddy:byte-buddy:${byteBuddyVersion}"
-    shade "net.bytebuddy:byte-buddy-agent:${byteBuddyVersion}"
-    // Velocity exposes Adventure API, but does not consistently ship adventure-nbt. Include
-    // NBT and its examination runtime dependencies; Velocity's parent-first loader will reuse
-    // its own matching examination classes when they are present.
-    shade "net.kyori:adventure-nbt:${adventureVersion}"
-
-    testImplementation "com.velocitypowered:velocity-api:${velocityVersion}"
-    testImplementation "io.netty:netty-buffer:${nettyVersion}"
-    testImplementation "io.netty:netty-common:${nettyVersion}"
-    testImplementation "io.netty:netty-transport:${nettyVersion}"
-    testImplementation platform("org.junit:junit-bom:${junitVersion}")
+//<editor-fold desc="Settings: Tests">
+dependencies {
+    // The default suite executes against the minimum supported runtime.
+    testImplementation "com.velocitypowered:velocity-api:${versionVelocity34}"
+    testImplementation "io.netty:netty-buffer:${versionNetty}"
+    testImplementation "io.netty:netty-common:${versionNetty}"
+    testImplementation "io.netty:netty-transport:${versionNetty}"
+    testImplementation "net.bytebuddy:byte-buddy:${versionByteBuddy}"
+    testImplementation "net.bytebuddy:byte-buddy-agent:${versionByteBuddy}"
+    testImplementation platform("org.junit:junit-bom:${versionJUnit}")
     testImplementation 'org.junit.jupiter:junit-jupiter'
     testImplementation 'org.junit.jupiter:junit-jupiter-params'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
@@ -80,45 +193,35 @@ sourceSets {
     }
 }
 
-configurations.velocity4TestCompileClasspath.attributes {
-    attribute(org.gradle.api.attributes.java.TargetJvmVersion.TARGET_JVM_VERSION_ATTRIBUTE, 25)
-}
-configurations.velocity4TestRuntimeClasspath.attributes {
-    attribute(org.gradle.api.attributes.java.TargetJvmVersion.TARGET_JVM_VERSION_ATTRIBUTE, 25)
+[configurations.velocity4TestCompileClasspath, configurations.velocity4TestRuntimeClasspath].each { configuration ->
+    configuration.attributes {
+        attribute(TargetJvmVersion.TARGET_JVM_VERSION_ATTRIBUTE, compilerJavaVersion)
+    }
 }
 
 dependencies {
     velocity4TestImplementation files(sourceSets.main.output)
-    velocity4TestImplementation "com.velocitypowered:velocity-api:${velocity4Version}"
-    velocity4TestImplementation "net.kyori:adventure-nbt:${adventureVersion}"
-    velocity4TestImplementation "io.netty:netty-buffer:${nettyVersion}"
-    velocity4TestImplementation "io.netty:netty-common:${nettyVersion}"
-    velocity4TestImplementation "io.netty:netty-transport:${nettyVersion}"
-    velocity4TestImplementation "net.bytebuddy:byte-buddy:${byteBuddyVersion}"
-    velocity4TestImplementation "net.bytebuddy:byte-buddy-agent:${byteBuddyVersion}"
-    velocity4TestImplementation platform("org.junit:junit-bom:${junitVersion}")
+    velocity4TestImplementation "com.velocitypowered:velocity-api:${versionVelocity}"
+    velocity4TestImplementation "net.kyori:adventure-nbt:${versionAdventure}"
+    velocity4TestImplementation "io.netty:netty-buffer:${versionNetty}"
+    velocity4TestImplementation "io.netty:netty-common:${versionNetty}"
+    velocity4TestImplementation "io.netty:netty-transport:${versionNetty}"
+    velocity4TestImplementation "net.bytebuddy:byte-buddy:${versionByteBuddy}"
+    velocity4TestImplementation "net.bytebuddy:byte-buddy-agent:${versionByteBuddy}"
+    velocity4TestImplementation platform("org.junit:junit-bom:${versionJUnit}")
     velocity4TestImplementation 'org.junit.jupiter:junit-jupiter'
     velocity4TestRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8'
-    options.release = 21
     options.compilerArgs += ['-parameters', '-Xlint:all,-processing']
-}
-
-tasks.named('processResources', ProcessResources) {
-    inputs.property 'pluginVersion', project.version
-    filesMatching('velocity-plugin.json') {
-        expand pluginVersion: project.version
-    }
 }
 
 tasks.named('compileVelocity4TestJava', JavaCompile) {
     javaCompiler = javaToolchains.compilerFor {
-        languageVersion = JavaLanguageVersion.of(25)
+        languageVersion = JavaLanguageVersion.of(compilerJavaVersion)
     }
-    options.release = 21
 }
 
 tasks.withType(Test).configureEach {
@@ -126,7 +229,7 @@ tasks.withType(Test).configureEach {
 }
 
 tasks.named('test', Test) {
-    dependsOn 'shadowJar'
+    dependsOn tasks.named('shadowJar')
     javaLauncher = javaToolchains.launcherFor {
         languageVersion = JavaLanguageVersion.of(21)
     }
@@ -143,7 +246,7 @@ tasks.register('packagedInstrumentationJava25Test', Test) {
     testClassesDirs = sourceSets.test.output.classesDirs
     classpath = sourceSets.test.runtimeClasspath
     javaLauncher = javaToolchains.launcherFor {
-        languageVersion = JavaLanguageVersion.of(25)
+        languageVersion = JavaLanguageVersion.of(compilerJavaVersion)
     }
     filter {
         includeTestsMatching 'org.lime.velocidialog.inject.PackagedInstrumentationForkTest'
@@ -160,7 +263,7 @@ tasks.register('velocity4Test', Test) {
     testClassesDirs = sourceSets.velocity4Test.output.classesDirs
     classpath = sourceSets.velocity4Test.runtimeClasspath
     javaLauncher = javaToolchains.launcherFor {
-        languageVersion = JavaLanguageVersion.of(25)
+        languageVersion = JavaLanguageVersion.of(compilerJavaVersion)
     }
     useJUnitPlatform()
 }
@@ -168,31 +271,18 @@ tasks.register('velocity4Test', Test) {
 tasks.named('check') {
     dependsOn tasks.named('velocity4Test'), tasks.named('packagedInstrumentationJava25Test')
 }
+//</editor-fold>
 
 tasks.named('jar', Jar) {
     archiveClassifier = 'plain'
 }
 
-tasks.named('shadowJar', com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar) {
-    archiveBaseName = 'Velocidialog'
-    archiveClassifier = ''
-    configurations = [project.configurations.shade]
-
-    // Keep only the standalone byte-buddy-agent artifact canonical: its self-attachment protocol
-    // looks up these exact names. AgentBuilder belongs to byte-buddy core and must be relocated.
-    relocate('net.bytebuddy', 'org.lime.velocidialog.internal.bytebuddy') {
-        exclude 'net/bytebuddy/agent/Attacher*'
-        exclude 'net/bytebuddy/agent/ByteBuddyAgent*'
-        exclude 'net/bytebuddy/agent/Installer*'
-        exclude 'net/bytebuddy/agent/VirtualMachine*'
-        exclude 'net/bytebuddy/agent/package-info*'
-        exclude 'net/bytebuddy/agent/utility/**'
-    }
-
+shadowJar {
+    archiveClassifier.set('')
+    configurations = [project.configurations.relocate]
 }
-
-tasks.named('assemble') {
-    dependsOn tasks.named('shadowJar')
+artifacts {
+    archives tasks.shadowJar
 }
 
 publishing {
@@ -201,9 +291,9 @@ publishing {
             groupId = project.group
             artifactId = 'velocidialog'
             version = project.version
-            artifact tasks.named('shadowJar')
-            artifact tasks.named('sourcesJar')
-            artifact tasks.named('javadocJar')
+            artifact tasks.shadowJar
+            artifact tasks.sourcesJar
+            artifact tasks.javadocJar
             pom {
                 name = 'Velocidialog'
                 description = 'Kyori dialog support for Velocity, including the configuration phase.'

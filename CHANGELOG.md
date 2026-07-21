@@ -14,8 +14,8 @@
   protocol NBT codec, managed callbacks, and `Dialogs.showAndAwait`.
 - Added Byte Buddy retransformation with a parent-classloader bridge and direct runtime
   instrumentation through `ByteBuddyAgent.install()`; no startup agent or JVM flags are required.
-- Added real Fabric Client Game Tests for protocols 771–776 with pinned LOOHP/Limbo backends,
-  Velocity compatibility probing, and serialized tag/daily/manual GitHub Actions coverage with
-  screenshots and machine-readable result markers.
+- Added real Fabric Client Game Tests for protocols 771–776 with an in-process Fabric dedicated
+  backend provided by `TestDedicatedServerContext`, Velocity compatibility probing, and serialized
+  tag/daily/manual GitHub Actions coverage with screenshots and machine-readable result markers.
 - Fixed callback registrations remaining live when an awaiting future was completed, failed, or
   cancelled externally.

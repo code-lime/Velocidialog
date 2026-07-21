@@ -198,7 +198,8 @@ public final class DialogPacketBodies {
                         "Custom-click NBT is deeper than " + MAX_CUSTOM_CLICK_NBT_DEPTH
                 );
             }
-            for (final java.util.Map.Entry<String, ? extends BinaryTag> entry : compound) {
+            final Iterable<java.util.Map.Entry<String, ? extends BinaryTag>> entries = compound;
+            for (final java.util.Map.Entry<String, ? extends BinaryTag> entry : entries) {
                 validateNbtDepth(entry.getValue(), depth);
             }
         } else if (tag instanceof ListBinaryTag list) {
@@ -208,7 +209,8 @@ public final class DialogPacketBodies {
                         "Custom-click NBT is deeper than " + MAX_CUSTOM_CLICK_NBT_DEPTH
                 );
             }
-            for (final BinaryTag element : list) {
+            final Iterable<BinaryTag> elements = list;
+            for (final BinaryTag element : elements) {
                 validateNbtDepth(element, depth);
             }
         }

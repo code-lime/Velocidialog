@@ -204,12 +204,7 @@ jobs:
           gradle-version: wrapper
 
       - name: Build
-        run: |
-          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
-            ./gradlew clean build -PpluginVersion="${GITHUB_REF_NAME}"
-          else
-            ./gradlew clean build
-          fi
+        run: ./gradlew build
 
       - name: Select distribution jars
         id: output_jar
@@ -281,6 +276,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
       - name: Set up JDK 25 compiler and JDK 21 Gradle runtime
         uses: actions/setup-java@v4
@@ -299,7 +297,7 @@ jobs:
           gradle-version: wrapper
 
       - name: Publish Maven package
-        run: ./gradlew publish -PpluginVersion="${GITHUB_REF_NAME}"
+        run: ./gradlew publish
 
       - name: Download changelog from artifact
         uses: actions/download-artifact@v4

@@ -58,7 +58,7 @@ public final class DialogNbtCodec {
         private CompoundBinaryTag encodeDialogLike(final DialogLike dialogLike) {
             if (!(dialogLike instanceof Dialog dialog)) {
                 throw new DialogEncodingException(
-                        "Unsupported DialogLike implementation " + dialogLike.getClass().getName()
+                        "Unsupported DialogLike implementation " + ((Object) dialogLike).getClass().getName()
                 );
             }
             return encodeDialog(dialog);
@@ -217,7 +217,8 @@ public final class DialogNbtCodec {
                 final String clickType = click.getString("action");
                 final CompoundBinaryTag.Builder output = CompoundBinaryTag.builder()
                         .putString("type", "minecraft:" + clickType);
-                for (final Map.Entry<String, ? extends BinaryTag> field : click) {
+                final Iterable<Map.Entry<String, ? extends BinaryTag>> fields = click;
+                for (final Map.Entry<String, ? extends BinaryTag> field : fields) {
                     if (!"action".equals(field.getKey())) {
                         output.put(field.getKey(), field.getValue());
                     }

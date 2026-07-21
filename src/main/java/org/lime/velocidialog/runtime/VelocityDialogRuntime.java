@@ -92,7 +92,7 @@ public final class VelocityDialogRuntime implements Dialogs.Provider,
         }
         if (!(dialogLike instanceof Dialog dialog)) {
             throw new IllegalArgumentException("Unsupported DialogLike implementation: "
-                    + dialogLike.getClass().getName()
+                    + ((Object) dialogLike).getClass().getName()
                     + "; use org.lime.velocidialog.api.dialog.Dialog");
         }
 
@@ -261,7 +261,7 @@ public final class VelocityDialogRuntime implements Dialogs.Provider,
         }
         if (!connections.supports(player)) {
             operation.result().completeExceptionally(new IllegalArgumentException(
-                    "Player is not Velocity's ConnectedPlayer: " + player.getClass().getName()));
+                    "Player is not Velocity's ConnectedPlayer: " + ((Object) player).getClass().getName()));
             return operation.result();
         }
 

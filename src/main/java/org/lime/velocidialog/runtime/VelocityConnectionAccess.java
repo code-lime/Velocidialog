@@ -94,7 +94,7 @@ final class VelocityConnectionAccess {
     Object connection(final Player player) {
         if (!supports(player)) {
             throw new IllegalArgumentException("Player is not Velocity's ConnectedPlayer: "
-                    + player.getClass().getName());
+                    + ((Object) player).getClass().getName());
         }
         return invoke(getConnection, player);
     }
