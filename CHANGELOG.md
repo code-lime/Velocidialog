@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.0-SNAPSHOT
+## 0.0.1
 
 - Initial Velocidialog implementation.
 - Added direct inline dialogs in initial/repeated CONFIGURATION and PLAY.
